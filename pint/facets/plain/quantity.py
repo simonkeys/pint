@@ -629,14 +629,14 @@ class PlainQuantity(PrettyIPython, SharedRegistryObject, Generic[_MagnitudeType]
         <Quantity(10.0, 'millinewton')>
         """
 
-        if not isinstance(self.magnitude, numbers.Number):
-            msg = (
-                "to_compact applied to non numerical types "
-                "has an undefined behavior."
-            )
-            w = RuntimeWarning(msg)
-            warnings.warn(w, stacklevel=2)
-            return self
+        # if not isinstance(self.magnitude, numbers.Number):
+        #     msg = (
+        #         "to_compact applied to non numerical types "
+        #         "has an undefined behavior."
+        #     )
+        #     w = RuntimeWarning(msg)
+        #     warnings.warn(w, stacklevel=2)
+        #     return self
 
         if (
             self.unitless
