@@ -1,6 +1,7 @@
 import doctest
 import pickle
 import re
+import contextlib
 
 import pytest
 from packaging.version import parse as version_parse
@@ -10,6 +11,7 @@ from pint.testing import assert_equal as assert_quantity_equal  # noqa: F401
 
 from ..compat import (
     HAS_BABEL,
+    HAS_MIP,
     HAS_NUMPY,
     HAS_NUMPY_ARRAY_FUNCTION,
     HAS_UNCERTAINTIES,
@@ -34,20 +36,22 @@ _sq_re = re.compile(
 _unit_re = re.compile(r"<Unit\((.*)\)>")
 
 
+def internal(ureg):
+    return ureg
+
+
 class PintOutputChecker(doctest.OutputChecker):
     def check_output(self, want, got, optionflags):
         check = super().check_output(want, got, optionflags)
         if check:
             return check
 
-        try:
+        with contextlib.suppress(Exception):
             if eval(want) == eval(got):
                 return True
-        except Exception:
-            pass
 
         for regex in (_q_re, _sq_re):
-            try:
+            with contextlib.suppress(Exception):
                 parsed_got = regex.match(got.replace(r"\\", "")).groupdict()
                 parsed_want = regex.match(want.replace(r"\\", "")).groupdict()
 
@@ -61,12 +65,10 @@ class PintOutputChecker(doctest.OutputChecker):
                     return False
 
                 return True
-            except Exception:
-                pass
 
         cnt = 0
         for regex in (_unit_re,):
-            try:
+            with contextlib.suppress(Exception):
                 parsed_got, tmp = regex.subn("\1", got)
                 cnt += tmp
                 parsed_want, temp = regex.subn("\1", want)
@@ -74,9 +76,6 @@ class PintOutputChecker(doctest.OutputChecker):
 
                 if parsed_got == parsed_want:
                     return True
-
-            except Exception:
-                pass
 
         if cnt:
             # If there was any replacement, we try again the previous methods.
@@ -139,6 +138,7 @@ requires_uncertainties = pytest.mark.skipif(
 requires_not_uncertainties = pytest.mark.skipif(
     HAS_UNCERTAINTIES, reason="Requires Uncertainties not to be installed."
 )
+requires_mip = pytest.mark.skipif(not HAS_MIP, reason="Requires MIP")
 
 # Parametrization
 

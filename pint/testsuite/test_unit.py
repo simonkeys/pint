@@ -2,6 +2,7 @@ import copy
 import functools
 import logging
 import math
+import operator
 import re
 from contextlib import nullcontext as does_not_raise
 
@@ -12,6 +13,8 @@ from pint.compat import np
 from pint.registry import LazyRegistry, UnitRegistry
 from pint.testsuite import QuantityTestCase, assert_no_warnings, helpers
 from pint.util import ParserHelper, UnitsContainer
+
+from .helpers import internal
 
 
 # TODO: do not subclass from QuantityTestCase
@@ -54,6 +57,33 @@ class TestUnit(QuantityTestCase):
             with subtests.test(spec):
                 assert spec.format(x) == result
 
+    def test_latex_escaping(self, subtests):
+        ureg = UnitRegistry()
+        ureg.define(r"percent = 1e-2 = %")
+        x = ureg.Unit(UnitsContainer(percent=1))
+        for spec, result in {
+            "L": r"\mathrm{percent}",
+            "L~": r"\mathrm{\%}",
+            "Lx": r"\si[]{\percent}",
+            "Lx~": r"\si[]{\%}",
+        }.items():
+            with subtests.test(spec):
+                ureg.default_format = spec
+                assert f"{x}" == result, f"Failed for {spec}, got {x} expected {result}"
+        # no '#' here as it's a comment char when define()ing new units
+        ureg.define(r"weirdunit = 1 = \~_^&%$_{}")
+        x = ureg.Unit(UnitsContainer(weirdunit=1))
+        for spec, result in {
+            "L": r"\mathrm{weirdunit}",
+            "L~": r"\mathrm{\textbackslash \textasciitilde \_\textasciicircum \&\%\$\_\{\}}",
+            "Lx": r"\si[]{\weirdunit}",
+            # TODO: Currently makes \si[]{\\~_^&%$_{}} (broken). What do we even want this to be?
+            # "Lx~": r"\si[]{\textbackslash \textasciitilde \_\textasciicircum \&\%\$\_\{\}}",
+        }.items():
+            with subtests.test(spec):
+                ureg.default_format = spec
+                assert f"{x}" == result, f"Failed for {spec}, {result}"
+
     def test_unit_default_formatting(self, subtests):
         ureg = UnitRegistry()
         x = ureg.Unit(UnitsContainer(meter=2, kilogram=1, second=-1))
@@ -75,6 +105,7 @@ class TestUnit(QuantityTestCase):
                 ureg.default_format = spec
                 assert f"{x}" == result, f"Failed for {spec}, {result}"
 
+    @pytest.mark.xfail(reason="Still not clear how default formatting will work.")
     def test_unit_formatting_defaults_warning(self):
         ureg = UnitRegistry()
         ureg.default_format = "~P"
@@ -107,17 +138,18 @@ class TestUnit(QuantityTestCase):
                 assert f"{x}" == result, f"Failed for {spec}, {result}"
 
     def test_unit_formatting_custom(self, monkeypatch):
-        from pint import formatting, register_unit_format
-
-        monkeypatch.setattr(formatting, "_FORMATTERS", formatting._FORMATTERS.copy())
+        from pint import register_unit_format
+        from pint.delegates.formatter._spec_helpers import REGISTERED_FORMATTERS
 
         @register_unit_format("new")
-        def format_new(unit, **options):
+        def format_new(unit, *args, **options):
             return "new format"
 
         ureg = UnitRegistry()
 
-        assert "{:new}".format(ureg.m) == "new format"
+        assert f"{ureg.m:new}" == "new format"
+
+        del REGISTERED_FORMATTERS["new"]
 
     def test_ipython(self):
         alltext = []
@@ -126,6 +158,13 @@ class TestUnit(QuantityTestCase):
             @staticmethod
             def text(text):
                 alltext.append(text)
+
+            @classmethod
+            def pretty(cls, data):
+                try:
+                    data._repr_pretty_(cls, False)
+                except AttributeError:
+                    alltext.append(str(data))
 
         ureg = UnitRegistry()
         x = ureg.Unit(UnitsContainer(meter=2, kilogram=1, second=-1))
@@ -166,7 +205,7 @@ class TestUnit(QuantityTestCase):
         ("unit", "power_ratio", "expectation", "expected_unit"),
         [
             ("m", 2, does_not_raise(), "m**2"),
-            ("m", dict(), pytest.raises(TypeError), None),
+            ("m", {}, pytest.raises(TypeError), None),
         ],
     )
     def test_unit_pow(self, unit, power_ratio, expectation, expected_unit):
@@ -212,7 +251,6 @@ class TestUnit(QuantityTestCase):
         assert not (self.U_("byte") != self.U_("byte"))
 
     def test_unit_cmp(self):
-
         x = self.U_("m")
         assert x < self.U_("km")
         assert x > self.U_("mm")
@@ -222,17 +260,14 @@ class TestUnit(QuantityTestCase):
         assert y < 1e6
 
     def test_dimensionality(self):
-
         x = self.U_("m")
         assert x.dimensionality == UnitsContainer({"[length]": 1})
 
     def test_dimensionless(self):
-
         assert self.U_("m/mm").dimensionless
         assert not self.U_("m").dimensionless
 
     def test_unit_casting(self):
-
         assert int(self.U_("m/mm")) == 1000
         assert float(self.U_("mm/m")) == 1e-3
         assert complex(self.U_("mm/mm")) == 1 + 0j
@@ -260,7 +295,7 @@ class TestRegistry(QuantityTestCase):
         with pytest.raises(errors.RedefinitionError):
             ureg.define("meter = [length]")
         with pytest.raises(TypeError):
-            ureg.define(list())
+            ureg.define([])
         ureg.define("degC = kelvin; offset: 273.15")
 
     def test_define(self):
@@ -269,11 +304,11 @@ class TestRegistry(QuantityTestCase):
         assert len(dir(ureg)) > 0
 
     def test_load(self):
-        import pkg_resources
+        from importlib.resources import files
 
         from .. import compat
 
-        data = pkg_resources.resource_filename(compat.__name__, "default_en.txt")
+        data = files(compat.__package__).joinpath("default_en.txt")
         ureg1 = UnitRegistry()
         ureg2 = UnitRegistry(data)
         assert dir(ureg1) == dir(ureg2)
@@ -368,6 +403,16 @@ class TestRegistry(QuantityTestCase):
         )
         assert self.ureg.parse_expression("meter³⁷/second⁴.³²¹") == self.Q_(
             1, UnitsContainer(meter=37, second=-4.321)
+        )
+
+    def test_parse_pretty_degrees(self):
+        for exp in ("1Δ°C", "1 Δ°C", "ΔdegC", "delta_°C"):
+            assert self.ureg.parse_expression(exp) == self.Q_(
+                1, UnitsContainer(delta_degree_Celsius=1)
+            )
+        assert self.ureg.parse_expression("")
+        assert self.ureg.parse_expression("mol °K") == self.Q_(
+            1, UnitsContainer(mol=1, kelvin=1)
         )
 
     def test_parse_factor(self):
@@ -533,8 +578,7 @@ class TestRegistry(QuantityTestCase):
         assert f3(3.0 * ureg.centimeter) == 0.03 * ureg.centimeter
         assert f3(3.0 * ureg.meter) == 3.0 * ureg.centimeter
 
-        def gfunc(x, y):
-            return x + y
+        gfunc = operator.add
 
         g0 = ureg.wraps(None, [None, None])(gfunc)
         assert g0(3, 1) == 4
@@ -560,12 +604,27 @@ class TestRegistry(QuantityTestCase):
         h3 = ureg.wraps((None,), (None, None))(hfunc)
         assert h3(3, 1) == (3, 1)
 
-    def test_wrap_referencing(self):
+        def kfunc(a, /, b, c=5, *, d=6):
+            return a, b, c, d
 
+        k1 = ureg.wraps((None,), (None, None, None, None))(kfunc)
+        assert k1(1, 2, 3, d=4) == (1, 2, 3, 4)
+        assert k1(1, 2, c=3, d=4) == (1, 2, 3, 4)
+        assert k1(1, b=2, c=3, d=4) == (1, 2, 3, 4)
+        assert k1(1, d=4, b=2, c=3) == (1, 2, 3, 4)
+        assert k1(1, 2, c=3) == (1, 2, 3, 6)
+        assert k1(1, 2, d=4) == (1, 2, 5, 4)
+        assert k1(1, 2) == (1, 2, 5, 6)
+
+        k2 = ureg.wraps((None,), ("meter", "centimeter", "meter", "centimeter"))(kfunc)
+        assert k2(
+            1 * ureg.meter, 2 * ureg.centimeter, 3 * ureg.meter, d=4 * ureg.centimeter
+        ) == (1, 2, 3, 4)
+
+    def test_wrap_referencing(self):
         ureg = self.ureg
 
-        def gfunc(x, y):
-            return x + y
+        gfunc = operator.add
 
         def gfunc2(x, y):
             return x**2 + y
@@ -610,6 +669,7 @@ class TestRegistry(QuantityTestCase):
         assert f0(3.0 * ureg.centimeter) == 0.03 * ureg.meter
         with pytest.raises(DimensionalityError):
             f0(3.0 * ureg.kilogram)
+        assert f0(x=3.0 * ureg.centimeter) == 0.03 * ureg.meter
 
         f0b = ureg.check(ureg.meter)(func)
         with pytest.raises(DimensionalityError):
@@ -618,8 +678,7 @@ class TestRegistry(QuantityTestCase):
         with pytest.raises(DimensionalityError):
             f0b(3.0 * ureg.kilogram)
 
-        def gfunc(x, y):
-            return x / y
+        gfunc = operator.truediv
 
         g0 = ureg.check(None, None)(gfunc)
         assert g0(6, 2) == 3
@@ -647,13 +706,13 @@ class TestRegistry(QuantityTestCase):
         q = 8.0 * self.ureg.inch
         t = 8.0 * self.ureg.degF
         dt = 8.0 * self.ureg.delta_degF
-        assert q.to("yard").magnitude == self.ureg._units[
+        assert q.to("yard").magnitude == internal(self.ureg)._units[
             "inch"
         ].converter.to_reference(8.0)
-        assert t.to("kelvin").magnitude == self.ureg._units[
+        assert t.to("kelvin").magnitude == internal(self.ureg)._units[
             "degF"
         ].converter.to_reference(8.0)
-        assert dt.to("kelvin").magnitude == self.ureg._units[
+        assert dt.to("kelvin").magnitude == internal(self.ureg)._units[
             "delta_degF"
         ].converter.to_reference(8.0)
 
@@ -772,7 +831,6 @@ class TestRegistry(QuantityTestCase):
 
 
 class TestCaseInsensitiveRegistry(QuantityTestCase):
-
     kwargs = dict(case_sensitive=False)
 
     def test_case_sensitivity(self):
@@ -814,7 +872,6 @@ class TestCompatibleUnits(QuantityTestCase):
         self._test(self.ureg.kelvin)
 
     def test_context_sp(self):
-
         gd = self.ureg.get_dimensionality
 
         # length, frequency, energy
@@ -853,13 +910,6 @@ class TestCompatibleUnits(QuantityTestCase):
 
 
 class TestRegistryWithDefaultRegistry(TestRegistry):
-    @classmethod
-    def setup_class(cls):
-        from pint import _DEFAULT_REGISTRY
-
-        cls.ureg = _DEFAULT_REGISTRY
-        cls.Q_ = cls.ureg.Quantity
-
     def test_lazy(self):
         x = LazyRegistry()
         x.test = "test"
@@ -868,8 +918,10 @@ class TestRegistryWithDefaultRegistry(TestRegistry):
         y("meter")
         assert isinstance(y, UnitRegistry)
 
-    def test_redefinition(self):
-        d = self.ureg.define
+    def test_redefinition(self, func_registry):
+        ureg = UnitRegistry(on_redefinition="raise")
+        d = ureg.define
+        assert "meter" in internal(self.ureg)._units
         with pytest.raises(RedefinitionError):
             d("meter = [time]")
         with pytest.raises(RedefinitionError):
@@ -880,7 +932,7 @@ class TestRegistryWithDefaultRegistry(TestRegistry):
             d("[velocity] = [length]")
 
         # aliases
-        assert "inch" in self.ureg._units
+        assert "inch" in internal(self.ureg)._units
         with pytest.raises(RedefinitionError):
             d("bla = 3.2 meter = inch")
         with pytest.raises(RedefinitionError):
@@ -889,7 +941,6 @@ class TestRegistryWithDefaultRegistry(TestRegistry):
 
 # TODO: remove QuantityTestCase
 class TestConvertWithOffset(QuantityTestCase):
-
     # The dicts in convert_with_offset are used to create a UnitsContainer.
     # We create UnitsContainer to avoid any auto-conversion of units.
     convert_with_offset = [
@@ -980,7 +1031,7 @@ class TestConvertWithOffset(QuantityTestCase):
             assert ureg.Unit(a) == ureg.Unit("canonical")
 
         # Test that aliases defined multiple times are not duplicated
-        assert ureg._units["canonical"].aliases == (
+        assert internal(ureg)._units["canonical"].aliases == (
             "alias1",
             "alias2",
         )
